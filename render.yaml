@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: velora-salon
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --chdir .venv app:app
+    envVars:
+      - key: FLASK_SECRET_KEY
+        generateValue: true
+      - key: GOOGLE_CREDENTIALS_JSON
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: SMTP_USERNAME
+        value: valorasalon@gmail.com
+      - key: OWNER_EMAIL
+        value: valorasalon@gmail.com
