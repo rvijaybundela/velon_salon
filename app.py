@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+import requests
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "unisex-salon-secret-key")
@@ -25,10 +26,8 @@ CLOSE_HOUR = 21  # 9:00 PM
 MAX_BOOKING_DAYS = 7
 INDIA_TIME_ZONE = ZoneInfo("Asia/Kolkata")
 
-
-# =========================================================
-# =========================================================
 # # =========================================================
+# =========================================================
 # DATABASE + GOOGLE SHEETS / MAKE.COM
 # =========================================================
 
@@ -49,17 +48,20 @@ OWNER_EMAIL = os.getenv(
 def validate_appointment_window(appointment_date, appointment_time):
     try:
         selected_date = datetime.strptime(
-            appointment_date, "%Y-%m-%d"
+            appointment_date,
+            "%Y-%m-%d"
         ).date()
 
         selected_time = datetime.strptime(
-            appointment_time, "%H:%M"
+            appointment_time,
+            "%H:%M"
         ).time()
 
     except ValueError:
         return "Please choose a valid appointment date and time."
 
     now = datetime.now(INDIA_TIME_ZONE)
+
     today = now.date()
     last_date = today + timedelta(days=MAX_BOOKING_DAYS)
 
@@ -69,50 +71,29 @@ def validate_appointment_window(appointment_date, appointment_time):
             f"the next {MAX_BOOKING_DAYS} days."
         )
 
-    start_time = datetime.strptime("10:00", "%H:%M").time()
-    end_time = datetime.strptime("20:30", "%H:%M").time()
+    start_time = datetime.strptime(
+        "10:00",
+        "%H:%M"
+    ).time()
+
+    end_time = datetime.strptime(
+        "20:30",
+        "%H:%M"
+    ).time()
 
     if not start_time <= selected_time <= end_time:
-        return "Appointments are available from 10:00 AM to 8:30 PM."
+        return (
+            "Appointments are available from "
+            "10:00 AM to 8:30 PM."
+        )
 
     if selected_date == today and selected_time <= now.time():
-        return "That time has already passed. Please choose a later time."
+        return (
+            "That time has already passed. "
+            "Please choose a later time."
+        )
 
     return None
-
-
-def send_booking_to_make(payload):
-    """
-    Sends the booking from Flask to Make.com.
-    Make.com receives the webhook and saves the booking to Google Sheets.
-    """
-
-    if not MAKE_WEBHOOK_URL:
-        raise RuntimeError(
-            "MAKE_WEBHOOK_URL is not configured."
-        )
-
-    try:
-        response = requests.post(
-            MAKE_WEBHOOK_URL,
-            json=payload,
-            timeout=30
-        )
-
-        response.raise_for_status()
-
-    except requests.RequestException as error:
-        print("MAKE WEBHOOK ERROR:", repr(error))
-        raise RuntimeError(
-            "Booking service is temporarily unavailable."
-        ) from error
-
-    # Make webhook may return an empty response.
-    # Successful HTTP response is enough for the webhook request.
-    return {
-        "success": True,
-        "status_code": response.status_code
-    }
 # =========================================================
 
 # =========================================================
@@ -2353,19 +2334,9 @@ def home():
     )
 
 
-# =========================================================
-# # =========================================================
+## =========================================================
 # BOOK APPOINTMENT
 # =========================================================
-
-MAKE_AVAILABILITY_WEBHOOK_URL = os.getenv(
-    "MAKE_AVAILABILITY_WEBHOOK_URL", ""
-).strip()
-
-MAKE_BOOKING_WEBHOOK_URL = os.getenv(
-    "MAKE_BOOKING_WEBHOOK_URL", ""
-).strip()
-
 
 @app.route("/availability")
 def availability():
@@ -2374,12 +2345,24 @@ def availability():
     appointment_time = request.args.get("time", "").strip()
     stylist = request.args.get("stylist", "").strip()
 
-    if not all([appointment_date, appointment_time, stylist]):
+    # -----------------------------------------------------
+    # BASIC VALIDATION
+    # -----------------------------------------------------
+
+    if not all([
+        appointment_date,
+        appointment_time,
+        stylist
+    ]):
         return jsonify({
             "ok": False,
             "available": False,
             "message": "Choose a date, time, and stylist."
         }), 400
+
+    # -----------------------------------------------------
+    # DATE / TIME VALIDATION
+    # -----------------------------------------------------
 
     window_error = validate_appointment_window(
         appointment_date,
@@ -2393,39 +2376,112 @@ def availability():
             "message": window_error
         }), 400
 
+    # -----------------------------------------------------
+    # CHECK MAKE AVAILABILITY WEBHOOK
+    # -----------------------------------------------------
+
     if not MAKE_AVAILABILITY_WEBHOOK_URL:
+        print("ERROR: MAKE_AVAILABILITY_WEBHOOK_URL is empty")
+
         return jsonify({
             "ok": False,
             "available": False,
             "message": "Availability service is not configured."
         }), 503
 
+    # -----------------------------------------------------
+    # SEND REQUEST TO MAKE.COM
+    # -----------------------------------------------------
+
+    availability_data = {
+        "action": "availability",
+        "date": appointment_date,
+        "time": appointment_time,
+        "stylist": stylist
+    }
+
     try:
+
         response = requests.post(
             MAKE_AVAILABILITY_WEBHOOK_URL,
-            json={
-                "action": "availability",
-                "date": appointment_date,
-                "time": appointment_time,
-                "stylist": stylist
-            },
+            json=availability_data,
             timeout=30
+        )
+
+        print(
+            "MAKE AVAILABILITY STATUS:",
+            response.status_code
+        )
+
+        print(
+            "MAKE AVAILABILITY RESPONSE:",
+            response.text
         )
 
         response.raise_for_status()
 
-        result = response.json()
+        # -------------------------------------------------
+        # READ MAKE RESPONSE
+        # -------------------------------------------------
+
+        try:
+            result = response.json()
+
+        except ValueError:
+
+            print(
+                "MAKE AVAILABILITY ERROR: "
+                "Response is not valid JSON"
+            )
+
+            return jsonify({
+                "ok": False,
+                "available": False,
+                "message": "Invalid response from availability service."
+            }), 503
 
         if not isinstance(result, dict):
-            raise RuntimeError("Invalid availability response.")
 
-        return jsonify(result), (
-            200 if result.get("available", False)
-            else 409
+            return jsonify({
+                "ok": False,
+                "available": False,
+                "message": "Invalid availability response."
+            }), 503
+
+        # -------------------------------------------------
+        # RETURN RESULT TO WEBSITE
+        # -------------------------------------------------
+
+        if result.get("available") is True:
+
+            return jsonify({
+                "ok": True,
+                "available": True,
+                "message": result.get(
+                    "message",
+                    "Time slot is available."
+                )
+            }), 200
+
+        return jsonify({
+            "ok": False,
+            "available": False,
+            "code": result.get(
+                "code",
+                "UNAVAILABLE"
+            ),
+            "message": result.get(
+                "message",
+                "This time slot is not available."
+            )
+        }), 409
+
+    except requests.RequestException as error:
+
+        print(
+            "MAKE AVAILABILITY REQUEST ERROR:",
+            repr(error)
         )
-
-    except (requests.RequestException, ValueError) as error:
-        print("MAKE AVAILABILITY ERROR:", repr(error))
 
         return jsonify({
             "ok": False,
@@ -2434,26 +2490,282 @@ def availability():
         }), 503
 
 
+# =========================================================
+# BOOK APPOINTMENT
+# =========================================================
+
 @app.route("/book", methods=["POST"])
 def book():
 
     try:
-        payload = request.get_json(silent=True) or request.form
 
-        name = payload.get("name", "").strip()
-        phone = payload.get("phone", "").strip()
-        email = payload.get("email", "").strip().lower()
-        service = payload.get("service", "").strip()
-        stylist = payload.get("stylist", "").strip()
-        appointment_date = payload.get("date", "").strip()
-        appointment_time = payload.get("time", "").strip()
-        payment_option = payload.get("payment_option", "").strip()
+        payload = (
+            request.get_json(silent=True)
+            or request.form
+        )
 
-        service_price = SERVICE_PRICES.get(service)
+        name = payload.get(
+            "name",
+            ""
+        ).strip()
+
+        phone = payload.get(
+            "phone",
+            ""
+        ).strip()
+
+        email = payload.get(
+            "email",
+            ""
+        ).strip().lower()
+
+        service = payload.get(
+            "service",
+            ""
+        ).strip()
+
+        stylist = payload.get(
+            "stylist",
+            ""
+        ).strip()
+
+        appointment_date = payload.get(
+            "date",
+            ""
+        ).strip()
+
+        appointment_time = payload.get(
+            "time",
+            ""
+        ).strip()
+
+        payment_option = payload.get(
+            "payment_option",
+            ""
+        ).strip()
+
+        service_price = SERVICE_PRICES.get(
+            service
+        )
 
         # -------------------------------------------------
         # VALIDATION
         # -------------------------------------------------
+
+        if not all([
+            name,
+            phone,
+            email,
+            service,
+            stylist,
+            appointment_date,
+            appointment_time,
+            payment_option
+        ]):
+
+            return jsonify({
+                "ok": False,
+                "code": "VALIDATION",
+                "message": (
+                    "Please fill in all appointment details."
+                )
+            }), 400
+
+        if not phone.isdigit() or len(phone) != 10:
+
+            return jsonify({
+                "ok": False,
+                "code": "VALIDATION",
+                "message": (
+                    "Please enter a valid 10-digit phone number."
+                )
+            }), 400
+
+        if not re.fullmatch(
+            r"[^@\s]+@[^@\s]+\.[^@\s]+",
+            email
+        ):
+
+            return jsonify({
+                "ok": False,
+                "code": "VALIDATION",
+                "message": (
+                    "Please enter a valid email address."
+                )
+            }), 400
+
+        if service_price is None:
+
+            return jsonify({
+                "ok": False,
+                "code": "VALIDATION",
+                "message": (
+                    "Please select a valid service."
+                )
+            }), 400
+
+        if payment_option not in PAYMENT_OPTIONS:
+
+            return jsonify({
+                "ok": False,
+                "code": "VALIDATION",
+                "message": (
+                    "Please select a valid payment option."
+                )
+            }), 400
+
+        window_error = validate_appointment_window(
+            appointment_date,
+            appointment_time
+        )
+
+        if window_error:
+
+            return jsonify({
+                "ok": False,
+                "code": "VALIDATION",
+                "message": window_error
+            }), 400
+
+        # -------------------------------------------------
+        # CHECK BOOKING WEBHOOK
+        # -------------------------------------------------
+
+        if not MAKE_BOOKING_WEBHOOK_URL:
+
+            print(
+                "ERROR: MAKE_BOOKING_WEBHOOK_URL is empty"
+            )
+
+            return jsonify({
+                "ok": False,
+                "code": "SERVICE_ERROR",
+                "message": (
+                    "Booking service is not configured."
+                )
+            }), 503
+
+        # -------------------------------------------------
+        # SEND BOOKING TO MAKE.COM
+        # -------------------------------------------------
+
+        booking_data = {
+            "action": "booking",
+            "name": name,
+            "phone": phone,
+            "email": email,
+            "service": service,
+            "stylist": stylist,
+            "servicePrice": service_price,
+            "date": appointment_date,
+            "time": appointment_time,
+            "paymentOption": payment_option
+        }
+
+        response = requests.post(
+            MAKE_BOOKING_WEBHOOK_URL,
+            json=booking_data,
+            timeout=30
+        )
+
+        print(
+            "MAKE BOOKING STATUS:",
+            response.status_code
+        )
+
+        print(
+            "MAKE BOOKING RESPONSE:",
+            response.text
+        )
+
+        response.raise_for_status()
+
+        # -------------------------------------------------
+        # READ BOOKING RESPONSE
+        # -------------------------------------------------
+
+        try:
+            result = response.json()
+
+        except ValueError:
+
+            return jsonify({
+                "ok": False,
+                "code": "SERVICE_ERROR",
+                "message": (
+                    "Invalid response from booking service."
+                )
+            }), 503
+
+        if not isinstance(result, dict):
+
+            return jsonify({
+                "ok": False,
+                "code": "SERVICE_ERROR",
+                "message": (
+                    "Invalid response from booking service."
+                )
+            }), 503
+
+        # -------------------------------------------------
+        # BOOKING SUCCESS
+        # -------------------------------------------------
+
+        if result.get("ok"):
+
+            return jsonify(
+                result
+            ), 200
+
+        # -------------------------------------------------
+        # DUPLICATE BOOKING
+        # -------------------------------------------------
+
+        if result.get("code") == "DUPLICATE":
+
+            return jsonify(
+                result
+            ), 409
+
+        # -------------------------------------------------
+        # OTHER MAKE ERROR
+        # -------------------------------------------------
+
+        return jsonify(
+            result
+        ), 400
+
+    except requests.RequestException as error:
+
+        print(
+            "MAKE BOOKING ERROR:",
+            repr(error)
+        )
+
+        return jsonify({
+            "ok": False,
+            "code": "SERVICE_ERROR",
+            "message": (
+                "Booking service is temporarily unavailable."
+            )
+        }), 503
+
+    except Exception as error:
+
+        print(
+            "BOOKING ERROR:",
+            repr(error)
+        )
+
+        return jsonify({
+            "ok": False,
+            "code": "SERVICE_ERROR",
+            "message": (
+                "Booking could not be completed."
+            )
+        }), 500
+        # -------------------------------------------------
+        # VALIDATION
 
         if not all([
             name,
@@ -2515,7 +2827,7 @@ def book():
             }), 400
 
         # -------------------------------------------------
-        # SEND BOOKING TO MAKE
+        # SEND BOOKING TO MAKE.COM
         # -------------------------------------------------
 
         if not MAKE_BOOKING_WEBHOOK_URL:
@@ -2538,77 +2850,82 @@ def book():
             "paymentOption": payment_option
         }
 
-        response = requests.post(
-            MAKE_BOOKING_WEBHOOK_URL,
-            json=booking_data,
-            timeout=30
-        )
+        try:
 
-        response.raise_for_status()
+            response = requests.post(
+                MAKE_BOOKING_WEBHOOK_URL,
+                json=booking_data,
+                timeout=30
+            )
 
-        result = response.json()
+            print(
+                "MAKE BOOKING STATUS:",
+                response.status_code
+            )
 
-        if not isinstance(result, dict):
-            raise RuntimeError("Invalid booking response.")
+            print(
+                "MAKE BOOKING RESPONSE:",
+                response.text
+            )
 
-        # -------------------------------------------------
-        # RESPONSE
-        # -------------------------------------------------
+            response.raise_for_status()
 
-        if result.get("ok"):
-            return jsonify(result), 200
+            try:
+                result = response.json()
 
-        if result.get("code") == "DUPLICATE":
-            return jsonify(result), 409
+            except ValueError:
 
-        return jsonify(result), 400
+                return jsonify({
+                    "ok": False,
+                    "code": "SERVICE_ERROR",
+                    "message": (
+                        "Invalid response from booking service."
+                    )
+                }), 503
 
-    except requests.RequestException as error:
+            if not isinstance(result, dict):
+                return jsonify({
+                    "ok": False,
+                    "code": "SERVICE_ERROR",
+                    "message": (
+                        "Invalid booking response."
+                    )
+                }), 503
 
-        print("MAKE BOOKING ERROR:", repr(error))
+            if result.get("ok"):
+                return jsonify(result), 200
 
-        return jsonify({
-            "ok": False,
-            "code": "SERVICE_ERROR",
-            "message": "Booking service is temporarily unavailable."
-        }), 503
+            if result.get("code") == "DUPLICATE":
+                return jsonify(result), 409
 
-    except ValueError as error:
+            return jsonify(result), 400
 
-        print("MAKE RESPONSE ERROR:", repr(error))
+        except requests.RequestException as error:
 
-        return jsonify({
-            "ok": False,
-            "code": "SERVICE_ERROR",
-            "message": "Invalid response from booking service."
-        }), 503
+            print(
+                "MAKE BOOKING ERROR:",
+                repr(error)
+            )
+
+            return jsonify({
+                "ok": False,
+                "code": "SERVICE_ERROR",
+                "message": (
+                    "Booking service is temporarily unavailable."
+                )
+            }), 503
+
+
 # =========================================================
 # ADMIN
 # =========================================================
 
 @app.route("/admin")
 def admin():
-    result = call_google_script("GET", query={"action": "list"})
-    rows = result.get("bookings", [])
-    appointments = [
-        {
-            "id": index,
-            "name": row.get("Name", ""),
-            "phone": row.get("Phone", ""),
-            "email": row.get("Email", ""),
-            "service": row.get("Service", ""),
-            "stylist": row.get("Stylist", ""),
-            "date": row.get("Appointment Date", ""),
-            "time": row.get("Appointment Time", ""),
-            "created_at": row.get("Booked At", ""),
-        }
-        for index, row in enumerate(rows, start=1)
-    ]
-    appointments.sort(key=lambda item: (item["date"], item["time"], -item["id"]))
 
     return render_template_string(
         ADMIN_HTML,
-        appointments=appointments
+        appointments=[]
     )
 
 
@@ -2618,13 +2935,9 @@ def admin():
 
 @app.route("/admin/clear", methods=["POST"])
 def clear_appointments():
-    result = call_google_script("POST", {"action": "clear"})
-    if not result.get("ok"):
-        flash(result.get("message", "Unable to clear appointments."), "error")
-        return redirect(url_for("admin"))
 
     flash(
-        "All appointments have been cleared.",
+        "Appointments are managed through Google Sheets.",
         "success"
     )
 
@@ -2634,6 +2947,7 @@ def clear_appointments():
 # =========================================================
 # START APPLICATION
 # =========================================================
+
 if __name__ == "__main__":
 
     print("=" * 55)
@@ -2641,8 +2955,8 @@ if __name__ == "__main__":
     print("=" * 55)
     print("Website : http://127.0.0.1:5000")
     print("Admin   : http://127.0.0.1:5000/admin")
-    print("Storage : Google Sheets")
-    print("Booking : Google Apps Script /exec")
+    print("Storage : Google Sheets via Make.com")
+    print("Booking : Make.com Webhook")
     print("=" * 55)
 
     app.run(
