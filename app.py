@@ -32,8 +32,18 @@ INDIA_TIME_ZONE = ZoneInfo("Asia/Kolkata")
 # DATABASE + GOOGLE SHEETS / MAKE.COM
 # =========================================================
 
-MAKE_WEBHOOK_URL = os.getenv("MAKE_WEBHOOK_URL", "").strip()
-OWNER_EMAIL = os.getenv("OWNER_EMAIL", "velorastudio@gmail.com").strip()
+MAKE_AVAILABILITY_WEBHOOK_URL = os.getenv(
+    "MAKE_AVAILABILITY_WEBHOOK_URL", ""
+).strip()
+
+MAKE_BOOKING_WEBHOOK_URL = os.getenv(
+    "MAKE_BOOKING_WEBHOOK_URL", ""
+).strip()
+
+OWNER_EMAIL = os.getenv(
+    "OWNER_EMAIL",
+    "velorastudio@gmail.com"
+).strip()
 
 
 def validate_appointment_window(appointment_date, appointment_time):
